@@ -1,53 +1,21 @@
 // ─── LLM Configuration Routes ─────────────────────────────────
-// Endpoints for configuring and testing the LLM provider.
-// Config is persisted to PostgreSQL with AES-256-GCM encrypted API keys.
+// Thin controller — delegates to llm-service for business logic.
 
 import type { FastifyInstance } from "fastify";
-import { LLMEngine } from "../../llm/engine";
-import { PROVIDER_REGISTRY } from "../../llm/provider-registry";
 import type { LLMProviderConfig } from "../../llm/types";
-import { getDb } from "../../db/connection";
-import { ConfigStore } from "../../db/config-store";
+import {
+    listProviders,
+    getCurrentConfig,
+    configureProvider,
+    testConnection,
+    ConfigError,
+} from "../../services/llm-service";
 
-let currentConfig: LLMProviderConfig | null = null;
-let engine: LLMEngine | null = null;
-let configLoaded = false;
-
-/**
- * Try to load a previously saved config from the database.
- * Called once on first access to auto-restore the last config.
- */
-async function ensureConfigLoaded(): Promise<void> {
-    if (configLoaded) return;
-    configLoaded = true;
-
-    try {
-        const db = getDb();
-        const configStore = new ConfigStore(db);
-        const saved = await configStore.loadConfig();
-
-        if (saved) {
-            engine = new LLMEngine(saved);
-            currentConfig = saved;
-            console.log(`🔑 Loaded saved LLM config: ${saved.provider} / ${saved.model}`);
-        }
-    } catch (err) {
-        // DB might not be available yet — that's fine, user can configure later
-        console.warn("⚠️  Could not load saved LLM config:", err instanceof Error ? err.message : err);
-    }
-}
-
-/**
- * Get the current LLMEngine instance (used by other routes).
- * Auto-loads saved config from DB on first call.
- */
-export async function getLLMEngine(): Promise<LLMEngine | null> {
-    await ensureConfigLoaded();
-    return engine;
-}
+// Re-export for other routes that need the engine
+export { getLLMEngine } from "../../services/llm-service";
 
 export async function llmConfigRoutes(app: FastifyInstance) {
-    // GET /llm/providers — list all supported providers
+    // GET /llm/providers
     app.get(
         "/llm/providers",
         {
@@ -88,13 +56,13 @@ export async function llmConfigRoutes(app: FastifyInstance) {
         async (_request, reply) => {
             return reply.send({
                 success: true,
-                data: PROVIDER_REGISTRY,
+                data: listProviders(),
                 timestamp: new Date().toISOString(),
             });
         },
     );
 
-    // GET /llm/config — get current LLM configuration
+    // GET /llm/config
     app.get(
         "/llm/config",
         {
@@ -126,7 +94,9 @@ export async function llmConfigRoutes(app: FastifyInstance) {
             },
         },
         async (_request, reply) => {
-            if (!currentConfig) {
+            const config = getCurrentConfig();
+
+            if (!config) {
                 return reply.send({
                     success: true,
                     data: { configured: false },
@@ -134,15 +104,14 @@ export async function llmConfigRoutes(app: FastifyInstance) {
                 });
             }
 
-            // Don't expose the API key in the response
             return reply.send({
                 success: true,
                 data: {
-                    provider: currentConfig.provider,
-                    model: currentConfig.model,
-                    baseUrl: currentConfig.baseUrl,
-                    temperature: currentConfig.temperature,
-                    maxTokens: currentConfig.maxTokens,
+                    provider: config.provider,
+                    model: config.model,
+                    baseUrl: config.baseUrl,
+                    temperature: config.temperature,
+                    maxTokens: config.maxTokens,
                     configured: true,
                 },
                 timestamp: new Date().toISOString(),
@@ -150,7 +119,7 @@ export async function llmConfigRoutes(app: FastifyInstance) {
         },
     );
 
-    // PUT /llm/config — update LLM configuration
+    // PUT /llm/config
     app.put(
         "/llm/config",
         {
@@ -159,7 +128,7 @@ export async function llmConfigRoutes(app: FastifyInstance) {
                 summary: "Configure LLM provider",
                 description:
                     "Set or update the LLM provider configuration. " +
-                    "This takes effect immediately for all subsequent requests.",
+                    "Takes effect immediately for all subsequent requests.",
                 body: {
                     type: "object",
                     required: ["provider", "model"],
@@ -228,80 +197,25 @@ export async function llmConfigRoutes(app: FastifyInstance) {
             },
         },
         async (request, reply) => {
-            const body = request.body as LLMProviderConfig;
-
-            // Validate provider
-            const providerInfo = PROVIDER_REGISTRY.find((p) => p.id === body.provider);
-            if (!providerInfo) {
-                return reply.status(400).send({
-                    success: false,
-                    error: {
-                        code: "INVALID_PROVIDER",
-                        message: `Unsupported provider: "${body.provider}". Use GET /llm/providers for the list.`,
-                    },
-                    timestamp: new Date().toISOString(),
-                });
-            }
-
-            // Validate API key requirement
-            if (providerInfo.requiresApiKey && !body.apiKey) {
-                return reply.status(400).send({
-                    success: false,
-                    error: {
-                        code: "API_KEY_REQUIRED",
-                        message: `Provider "${body.provider}" requires an API key.`,
-                    },
-                    timestamp: new Date().toISOString(),
-                });
-            }
-
-            // Set defaults for Ollama
-            if (body.provider === "ollama" && !body.baseUrl) {
-                body.baseUrl = providerInfo.defaultBaseUrl;
-            }
-
             try {
-                // Create or reconfigure the engine
-                if (engine) {
-                    engine.reconfigure(body);
-                } else {
-                    engine = new LLMEngine(body);
-                }
-                currentConfig = body;
-
-                // Persist to database (API key will be encrypted)
-                try {
-                    const db = getDb();
-                    const configStore = new ConfigStore(db);
-                    await configStore.saveConfig(body);
-                } catch (dbErr) {
-                    // Non-fatal — config works in-memory even if DB save fails
-                    console.warn("⚠️  Could not persist LLM config to DB:", dbErr instanceof Error ? dbErr.message : dbErr);
-                }
-
+                const result = await configureProvider(request.body as LLMProviderConfig);
                 return reply.send({
                     success: true,
-                    data: {
-                        provider: body.provider,
-                        model: body.model,
-                        message: `LLM configured: ${providerInfo.name} / ${body.model}`,
-                    },
+                    data: result,
                     timestamp: new Date().toISOString(),
                 });
             } catch (err) {
+                const code = err instanceof ConfigError ? err.code : "CONFIG_ERROR";
                 return reply.status(400).send({
                     success: false,
-                    error: {
-                        code: "CONFIG_ERROR",
-                        message: err instanceof Error ? err.message : String(err),
-                    },
+                    error: { code, message: err instanceof Error ? err.message : String(err) },
                     timestamp: new Date().toISOString(),
                 });
             }
         },
     );
 
-    // POST /llm/test — test the current LLM configuration
+    // POST /llm/test
     app.post(
         "/llm/test",
         {
@@ -315,7 +229,7 @@ export async function llmConfigRoutes(app: FastifyInstance) {
                     properties: {
                         prompt: {
                             type: "string",
-                            description: 'Optional custom test prompt. Defaults to a simple greeting test.',
+                            description: 'Optional custom test prompt.',
                         },
                     },
                 },
@@ -354,53 +268,19 @@ export async function llmConfigRoutes(app: FastifyInstance) {
             },
         },
         async (request, reply) => {
-            if (!engine || !currentConfig) {
-                return reply.status(400).send({
-                    success: false,
-                    error: {
-                        code: "NOT_CONFIGURED",
-                        message: "LLM not configured. Use PUT /llm/config first.",
-                    },
-                    timestamp: new Date().toISOString(),
-                });
-            }
-
-            const body = (request.body as { prompt?: string }) ?? {};
-            const startTime = Date.now();
-
             try {
-                let response: string;
-                if (body.prompt) {
-                    const result = await engine.generateText(body.prompt, {
-                        temperature: 0.3,
-                        maxTokens: 200,
-                    });
-                    response = result.text;
-                } else {
-                    const result = await engine.testConnection();
-                    if (!result.success) {
-                        throw new Error(result.error);
-                    }
-                    response = result.response ?? "";
-                }
-
+                const body = (request.body as { prompt?: string }) ?? {};
+                const result = await testConnection(body.prompt);
                 return reply.send({
                     success: true,
-                    data: {
-                        provider: currentConfig.provider,
-                        model: currentConfig.model,
-                        response,
-                        latencyMs: Date.now() - startTime,
-                    },
+                    data: result,
                     timestamp: new Date().toISOString(),
                 });
             } catch (err) {
+                const code = err instanceof ConfigError ? err.code : "LLM_ERROR";
                 return reply.status(400).send({
                     success: false,
-                    error: {
-                        code: "LLM_ERROR",
-                        message: err instanceof Error ? err.message : String(err),
-                    },
+                    error: { code, message: err instanceof Error ? err.message : String(err) },
                     timestamp: new Date().toISOString(),
                 });
             }

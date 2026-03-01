@@ -1,18 +1,11 @@
 // ─── Agent Routes ─────────────────────────────────────────────
-// The main agent endpoint — processes user messages through the LangGraph orchestrator.
+// Thin controller — delegates to agent-service for business logic.
 
 import type { FastifyInstance } from "fastify";
-import { AgentOrchestrator } from "../../agent/orchestrator";
-import { getLLMEngine } from "./llm-config";
-import { getToolRegistry } from "./tools";
-import type { LLMProviderConfig } from "../../llm/types";
-
-// Default orchestrator — uses the saved LLM config
-let defaultOrchestrator: AgentOrchestrator | null = null;
-let lastConfigKey = "";
+import { processAgentMessage, AgentError } from "../../services/agent-service";
 
 export async function agentRoutes(app: FastifyInstance) {
-    // POST /agent/message — send a message to the agent
+    // POST /agent/message
     app.post(
         "/agent/message",
         {
@@ -37,11 +30,11 @@ export async function agentRoutes(app: FastifyInstance) {
                         },
                         model: {
                             type: "string",
-                            description: 'Optional. Override the model for this request (e.g., "gpt-4o", "claude-sonnet-4-20250514").',
+                            description: 'Optional. Override the model (e.g., "gpt-4o", "claude-sonnet-4-20250514").',
                         },
                         apiKey: {
                             type: "string",
-                            description: "Optional. API key for the overridden provider (only needed if switching providers).",
+                            description: "Optional. API key for the overridden provider.",
                         },
                     },
                 },
@@ -89,84 +82,26 @@ export async function agentRoutes(app: FastifyInstance) {
             },
         },
         async (request, reply) => {
-            const body = request.body as {
-                message: string;
-                provider?: string;
-                model?: string;
-                apiKey?: string;
-            };
-
-            // Check if LLM is configured (either via saved config or per-request override)
-            const engine = await getLLMEngine();
-            const hasOverride = body.provider || body.model;
-
-            if (!engine && !hasOverride) {
-                return reply.status(400).send({
-                    success: false,
-                    error: {
-                        code: "LLM_NOT_CONFIGURED",
-                        message:
-                            "LLM not configured. Use PUT /llm/config first, " +
-                            "or pass provider/model/apiKey in the request body.",
-                    },
-                    timestamp: new Date().toISOString(),
-                });
-            }
-
             try {
-                const registry = getToolRegistry();
-                let activeOrchestrator: AgentOrchestrator;
-                let activeConfig: LLMProviderConfig;
+                const body = request.body as {
+                    message: string;
+                    provider?: string;
+                    model?: string;
+                    apiKey?: string;
+                };
 
-                if (hasOverride) {
-                    // Build a per-request config by merging overrides with the saved config
-                    const baseConfig = engine?.getConfig();
-                    activeConfig = {
-                        provider: (body.provider ?? baseConfig?.provider ?? "openai") as LLMProviderConfig["provider"],
-                        model: body.model ?? baseConfig?.model ?? "gpt-4o",
-                        apiKey: body.apiKey ?? baseConfig?.apiKey,
-                        baseUrl: baseConfig?.baseUrl,
-                        temperature: baseConfig?.temperature,
-                        maxTokens: baseConfig?.maxTokens,
-                    };
-                    // Create a one-off orchestrator for this override
-                    activeOrchestrator = new AgentOrchestrator(activeConfig, registry);
-                } else {
-                    // Use the default saved config
-                    activeConfig = engine!.getConfig();
-                    const configKey = `${activeConfig.provider}:${activeConfig.model}`;
-
-                    // Recreate if config changed
-                    if (!defaultOrchestrator || configKey !== lastConfigKey) {
-                        defaultOrchestrator = new AgentOrchestrator(activeConfig, registry);
-                        lastConfigKey = configKey;
-                    }
-                    activeOrchestrator = defaultOrchestrator;
-                }
-
-                // Invoke the LangGraph agent
-                const result = await activeOrchestrator.invoke(body.message);
+                const result = await processAgentMessage(body);
 
                 return reply.send({
                     success: true,
-                    data: {
-                        response: result.response,
-                        toolCalls: result.toolCalls.map((tc: { toolName: string; result: string }) => ({
-                            toolName: tc.toolName,
-                            result: tc.result,
-                        })),
-                        provider: activeConfig.provider,
-                        model: activeConfig.model,
-                    },
+                    data: result,
                     timestamp: new Date().toISOString(),
                 });
             } catch (err) {
+                const code = err instanceof AgentError ? err.code : "AGENT_ERROR";
                 return reply.status(400).send({
                     success: false,
-                    error: {
-                        code: "AGENT_ERROR",
-                        message: err instanceof Error ? err.message : String(err),
-                    },
+                    error: { code, message: err instanceof Error ? err.message : String(err) },
                     timestamp: new Date().toISOString(),
                 });
             }

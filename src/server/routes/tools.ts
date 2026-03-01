@@ -1,23 +1,14 @@
 // ─── Tool Routes ──────────────────────────────────────────────
-// Endpoints for inspecting and executing registered tools.
+// Thin controller — delegates to tool-service for business logic.
 
 import type { FastifyInstance } from "fastify";
-import { ToolRegistry } from "../../tools/registry.js";
-import { builtinTools } from "../../tools/index.js";
+import { listTools, getToolMetadata, listToolNames, executeTool } from "../../services/tool-service";
 
-// Singleton registry — initialized with built-in tools
-const registry = new ToolRegistry();
-registry.registerAll(builtinTools);
-
-/**
- * Get the shared ToolRegistry instance (used by other modules).
- */
-export function getToolRegistry(): ToolRegistry {
-    return registry;
-}
+// Re-export for other modules that need the registry
+export { getToolRegistry } from "../../services/tool-service";
 
 export async function toolRoutes(app: FastifyInstance) {
-    // GET /tools — list all registered tools
+    // GET /tools
     app.get(
         "/tools",
         {
@@ -39,16 +30,17 @@ export async function toolRoutes(app: FastifyInstance) {
             },
         },
         async (_request, reply) => {
+            const { tools, count } = listTools();
             return reply.send({
                 success: true,
-                data: registry.getAllMetadata(),
-                count: registry.size,
+                data: tools,
+                count,
                 timestamp: new Date().toISOString(),
             });
         },
     );
 
-    // GET /tools/:name — get a single tool's metadata
+    // GET /tools/:name
     app.get(
         "/tools/:name",
         {
@@ -65,14 +57,14 @@ export async function toolRoutes(app: FastifyInstance) {
         },
         async (request, reply) => {
             const { name } = request.params as { name: string };
-            const metadata = registry.getMetadata(name);
+            const metadata = getToolMetadata(name);
 
             if (!metadata) {
                 return reply.status(404).send({
                     success: false,
                     error: {
                         code: "TOOL_NOT_FOUND",
-                        message: `Tool "${name}" not found. Available: ${registry.listNames().join(", ")}`,
+                        message: `Tool "${name}" not found. Available: ${listToolNames().join(", ")}`,
                     },
                     timestamp: new Date().toISOString(),
                 });
@@ -86,7 +78,7 @@ export async function toolRoutes(app: FastifyInstance) {
         },
     );
 
-    // POST /tools/:name/execute — manually execute a tool
+    // POST /tools/:name/execute
     app.post(
         "/tools/:name/execute",
         {
@@ -115,22 +107,19 @@ export async function toolRoutes(app: FastifyInstance) {
             const { name } = request.params as { name: string };
             const body = (request.body as { params?: Record<string, unknown> }) ?? {};
 
-            if (!registry.has(name)) {
-                return reply.status(404).send({
+            const result = await executeTool(name, body.params ?? {}) as any;
+
+            if (!result.success) {
+                return reply.status(result.code === "TOOL_NOT_FOUND" ? 404 : 400).send({
                     success: false,
-                    error: { code: "TOOL_NOT_FOUND", message: `Tool "${name}" not found.` },
+                    error: { code: result.code ?? "TOOL_ERROR", message: result.error },
                     timestamp: new Date().toISOString(),
                 });
             }
 
-            const result = await registry.execute(name, body.params ?? {});
-
-            return reply.status(result.success ? 200 : 400).send({
-                success: result.success,
-                data: result.success
-                    ? { toolName: name, result: result.data, executionTimeMs: result.executionTimeMs }
-                    : undefined,
-                error: result.error ? { code: "TOOL_ERROR", message: result.error } : undefined,
+            return reply.send({
+                success: true,
+                data: { toolName: name, result: result.data, executionTimeMs: result.executionTimeMs },
                 timestamp: new Date().toISOString(),
             });
         },
