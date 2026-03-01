@@ -12,7 +12,26 @@ import { BaseChatModel } from "@langchain/core/language_models/chat_models";
 import { DynamicStructuredTool } from "@langchain/core/tools";
 import { AIMessage, HumanMessage, SystemMessage } from "@langchain/core/messages";
 import type { BaseMessage } from "@langchain/core/messages";
+import { PostgresSaver } from "@langchain/langgraph-checkpoint-postgres";
 import { AGENT_SYSTEM_PROMPT } from "./prompts";
+
+// PostgresSaver — persists conversation state to the database
+let checkpointer: PostgresSaver | null = null;
+
+/**
+ * Get or create the PostgresSaver checkpointer.
+ * Lazily initialized and sets up required tables on first call.
+ */
+async function getCheckpointer(): Promise<PostgresSaver> {
+    if (checkpointer) return checkpointer;
+
+    const dbUrl = process.env.DATABASE_URL ?? "postgresql://localhost:5432/eventra";
+    checkpointer = PostgresSaver.fromConnString(dbUrl);
+    await checkpointer.setup();
+    console.log("✅ PostgresSaver checkpointer ready — threads persist across restarts");
+
+    return checkpointer;
+}
 
 // ─── Graph Builder ────────────────────────────────────────────
 
@@ -32,8 +51,11 @@ export interface AgentGraphConfig {
  * 1. **Agent Node**: LLM with tools bound — decides what to do
  * 2. **Tool Node**: Executes the tool calls from the agent
  * 3. **Conditional Edge**: Routes back to agent (if tool calls) or ends (if final response)
+ *
+ * Compiled with a MemorySaver checkpointer so conversation state is
+ * persisted per thread_id across multiple invocations.
  */
-export function buildAgentGraph(config: AgentGraphConfig) {
+export async function buildAgentGraph(config: AgentGraphConfig) {
     const { chatModel, tools, systemPrompt } = config;
 
     // Bind tools to the chat model — this enables function calling
@@ -43,12 +65,9 @@ export function buildAgentGraph(config: AgentGraphConfig) {
     const modelWithTools = chatModel.bindTools(tools);
 
     // ─── Agent Node ───────────────────────────────────────────
-    // The LLM processes the conversation and decides whether to
-    // call a tool or respond directly.
     async function agentNode(state: typeof MessagesAnnotation.State) {
         const messages = state.messages;
 
-        // Prepend system prompt if messages don't already have one
         const hasSystemMessage = messages.some(
             (m: BaseMessage) => m._getType() === "system",
         );
@@ -62,15 +81,12 @@ export function buildAgentGraph(config: AgentGraphConfig) {
     }
 
     // ─── Tool Node ────────────────────────────────────────────
-    // Executes all tool calls from the agent's response.
     const toolNode = new ToolNode(tools);
 
     // ─── Routing Function ─────────────────────────────────────
-    // Determines whether the agent should call tools or end.
     function shouldContinue(state: typeof MessagesAnnotation.State): "tools" | typeof END {
         const lastMessage = state.messages[state.messages.length - 1];
 
-        // If the LLM made tool calls, route to the tool node
         if (
             lastMessage &&
             lastMessage._getType() === "ai" &&
@@ -79,7 +95,6 @@ export function buildAgentGraph(config: AgentGraphConfig) {
             return "tools";
         }
 
-        // Otherwise, the response is final
         return END;
     }
 
@@ -94,11 +109,13 @@ export function buildAgentGraph(config: AgentGraphConfig) {
         })
         .addEdge("tools", "agent");
 
-    return graph.compile();
+    // Compile WITH checkpointer — enables thread-based persistence
+    const saver = await getCheckpointer();
+    return graph.compile({ checkpointer: saver });
 }
 
 // ─── Helper Types ─────────────────────────────────────────────
 
-export type AgentGraph = ReturnType<typeof buildAgentGraph>;
+export type AgentGraph = Awaited<ReturnType<typeof buildAgentGraph>>;
 
 export { HumanMessage, AIMessage, SystemMessage };

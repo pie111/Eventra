@@ -13,6 +13,7 @@ let lastConfigKey = "";
 
 export interface AgentMessageInput {
     message: string;
+    threadId?: string;
     provider?: string;
     model?: string;
     apiKey?: string;
@@ -20,6 +21,7 @@ export interface AgentMessageInput {
 
 export interface AgentMessageResult {
     response: string;
+    threadId: string;
     toolCalls: Array<{ toolName: string; result: string }>;
     provider: string;
     model: string;
@@ -68,10 +70,14 @@ export async function processAgentMessage(input: AgentMessageInput): Promise<Age
         activeOrchestrator = defaultOrchestrator;
     }
 
-    const result = await activeOrchestrator.invoke(input.message);
+    // Thread ID for conversation persistence — auto-generate if not provided
+    const threadId = input.threadId ?? `thread-${Date.now()}`;
+
+    const result = await activeOrchestrator.invoke(input.message, threadId);
 
     return {
         response: result.response,
+        threadId,
         toolCalls: result.toolCalls.map((tc: { toolName: string; result: string }) => ({
             toolName: tc.toolName,
             result: tc.result,

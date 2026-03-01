@@ -23,6 +23,10 @@ export async function agentRoutes(app: FastifyInstance) {
                             type: "string",
                             description: "Natural language message from the user",
                         },
+                        threadId: {
+                            type: "string",
+                            description: "Optional. Thread ID for conversation context. Reuse the same ID for multi-turn. Auto-generated if omitted.",
+                        },
                         provider: {
                             type: "string",
                             enum: ["openai", "anthropic", "google", "mistral", "ollama"],
@@ -47,6 +51,7 @@ export async function agentRoutes(app: FastifyInstance) {
                                 type: "object",
                                 properties: {
                                     response: { type: "string" },
+                                    threadId: { type: "string" },
                                     toolCalls: {
                                         type: "array",
                                         items: {
@@ -85,6 +90,7 @@ export async function agentRoutes(app: FastifyInstance) {
             try {
                 const body = request.body as {
                     message: string;
+                    threadId?: string;
                     provider?: string;
                     model?: string;
                     apiKey?: string;

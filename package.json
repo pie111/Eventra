@@ -29,6 +29,7 @@
         "@langchain/core": "^1.1.29",
         "@langchain/google-genai": "^1.0.0",
         "@langchain/langgraph": "^1.2.0",
+        "@langchain/langgraph-checkpoint-postgres": "^1.0.1",
         "@langchain/mistralai": "^1.0.0",
         "@langchain/openai": "^1.2.0",
         "ai": "^4.0.0",

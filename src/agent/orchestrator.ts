@@ -36,14 +36,15 @@ export interface OrchestratorResponse {
  *   const response = await orchestrator.invoke("What's the weather in Tokyo?");
  */
 export class AgentOrchestrator {
-    private graph: AgentGraph;
+    private graphPromise: Promise<AgentGraph>;
     private config: LLMProviderConfig;
 
     constructor(config: LLMProviderConfig, toolRegistry: ToolRegistry) {
         this.config = config;
         const chatModel = createChatModel(config);
         const tools = toolRegistry.getAll();
-        this.graph = buildAgentGraph({ chatModel, tools });
+        // buildAgentGraph is async (sets up PostgresSaver checkpointer), store the promise
+        this.graphPromise = buildAgentGraph({ chatModel, tools });
     }
 
     /**
@@ -53,59 +54,30 @@ export class AgentOrchestrator {
         this.config = config;
         const chatModel = createChatModel(config);
         const tools = toolRegistry.getAll();
-        this.graph = buildAgentGraph({ chatModel, tools });
+        this.graphPromise = buildAgentGraph({ chatModel, tools });
     }
 
     /**
      * Invoke the agent with a user message.
-     * Returns the final response along with any tool calls made.
+     * Pass a threadId to maintain conversation context across calls.
      */
-    async invoke(userMessage: string): Promise<OrchestratorResponse> {
-        const result = await this.graph.invoke({
-            messages: [new HumanMessage(userMessage)],
-        });
+    async invoke(userMessage: string, threadId?: string): Promise<OrchestratorResponse> {
+        const graph = await this.graphPromise;
+
+        const config = threadId
+            ? { configurable: { thread_id: threadId } }
+            : { configurable: { thread_id: `ephemeral-${Date.now()}` } };
+
+        const result = await graph.invoke(
+            { messages: [new HumanMessage(userMessage)] },
+            config,
+        );
 
         const messages = result.messages as BaseMessage[];
 
-        // Extract tool calls from the conversation
         const toolCalls: OrchestratorResponse["toolCalls"] = [];
         for (let i = 0; i < messages.length; i++) {
             const msg = messages[i];
-            if (msg._getType() === "tool") {
-                // Find the preceding AI message to get the tool name
-                const toolMessage = msg as BaseMessage & { name?: string; content: string };
-                toolCalls.push({
-                    toolName: toolMessage.name ?? "unknown",
-                    args: {},
-                    result: typeof toolMessage.content === "string" ? toolMessage.content : JSON.stringify(toolMessage.content),
-                });
-            }
-        }
-
-        // The last message is the agent's final response
-        const lastMessage = messages[messages.length - 1];
-        const response = typeof lastMessage.content === "string"
-            ? lastMessage.content
-            : JSON.stringify(lastMessage.content);
-
-        return { response, messages, toolCalls };
-    }
-
-    /**
-     * Invoke with full conversation history (multi-turn).
-     */
-    async invokeWithHistory(
-        userMessage: string,
-        history: BaseMessage[],
-    ): Promise<OrchestratorResponse> {
-        const result = await this.graph.invoke({
-            messages: [...history, new HumanMessage(userMessage)],
-        });
-
-        const messages = result.messages as BaseMessage[];
-
-        const toolCalls: OrchestratorResponse["toolCalls"] = [];
-        for (const msg of messages) {
             if (msg._getType() === "tool") {
                 const toolMessage = msg as BaseMessage & { name?: string; content: string };
                 toolCalls.push({
