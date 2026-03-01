@@ -1,19 +1,48 @@
 // ─── LLM Configuration Routes ─────────────────────────────────
 // Endpoints for configuring and testing the LLM provider.
+// Config is persisted to PostgreSQL with AES-256-GCM encrypted API keys.
 
 import type { FastifyInstance } from "fastify";
-import { LLMEngine } from "../../llm/engine.js";
-import { PROVIDER_REGISTRY } from "../../llm/provider-registry.js";
-import type { LLMProviderConfig } from "../../llm/types.js";
+import { LLMEngine } from "../../llm/engine";
+import { PROVIDER_REGISTRY } from "../../llm/provider-registry";
+import type { LLMProviderConfig } from "../../llm/types";
+import { getDb } from "../../db/connection";
+import { ConfigStore } from "../../db/config-store";
 
-// In-memory config store (will be replaced by database later)
 let currentConfig: LLMProviderConfig | null = null;
 let engine: LLMEngine | null = null;
+let configLoaded = false;
+
+/**
+ * Try to load a previously saved config from the database.
+ * Called once on first access to auto-restore the last config.
+ */
+async function ensureConfigLoaded(): Promise<void> {
+    if (configLoaded) return;
+    configLoaded = true;
+
+    try {
+        const db = getDb();
+        const configStore = new ConfigStore(db);
+        const saved = await configStore.loadConfig();
+
+        if (saved) {
+            engine = new LLMEngine(saved);
+            currentConfig = saved;
+            console.log(`🔑 Loaded saved LLM config: ${saved.provider} / ${saved.model}`);
+        }
+    } catch (err) {
+        // DB might not be available yet — that's fine, user can configure later
+        console.warn("⚠️  Could not load saved LLM config:", err instanceof Error ? err.message : err);
+    }
+}
 
 /**
  * Get the current LLMEngine instance (used by other routes).
+ * Auto-loads saved config from DB on first call.
  */
-export function getLLMEngine(): LLMEngine | null {
+export async function getLLMEngine(): Promise<LLMEngine | null> {
+    await ensureConfigLoaded();
     return engine;
 }
 
@@ -239,6 +268,16 @@ export async function llmConfigRoutes(app: FastifyInstance) {
                     engine = new LLMEngine(body);
                 }
                 currentConfig = body;
+
+                // Persist to database (API key will be encrypted)
+                try {
+                    const db = getDb();
+                    const configStore = new ConfigStore(db);
+                    await configStore.saveConfig(body);
+                } catch (dbErr) {
+                    // Non-fatal — config works in-memory even if DB save fails
+                    console.warn("⚠️  Could not persist LLM config to DB:", dbErr instanceof Error ? dbErr.message : dbErr);
+                }
 
                 return reply.send({
                     success: true,

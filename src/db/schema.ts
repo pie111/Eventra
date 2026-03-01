@@ -119,3 +119,35 @@ export const memory = pgTable("memory", {
 
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
+
+// ─── LLM Configs Table ────────────────────────────────────────
+// Stores LLM provider configuration per user. API keys are AES-256-GCM encrypted.
+
+export const llmConfigs = pgTable("llm_configs", {
+    id: text("id")
+        .primaryKey()
+        .default(sql`gen_random_uuid()`),
+
+    userId: text("user_id").notNull().default("default"),
+
+    /** LLM provider (openai, anthropic, google, mistral, ollama) */
+    provider: text("provider").notNull(),
+
+    /** Model identifier (e.g., "gpt-4o", "claude-sonnet-4-20250514") */
+    model: text("model").notNull(),
+
+    /** Encrypted API key (AES-256-GCM: iv:authTag:ciphertext) */
+    encryptedApiKey: text("encrypted_api_key"),
+
+    /** Custom base URL */
+    baseUrl: text("base_url"),
+
+    /** Temperature (0-2) */
+    temperature: text("temperature"),
+
+    /** Max tokens */
+    maxTokens: text("max_tokens"),
+
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
